@@ -2,6 +2,7 @@ import sys
 from datetime import timedelta
 import itertools
 from typing import List
+import urllib.parse
 
 import requests
 import requests_cache
@@ -37,6 +38,27 @@ def generate_distances(cps: Checkpoints):
         d = geopy.distance.geodesic((cp_a.lat, cp_a.lng), (cp_b.lat, cp_b.lng)).m
         yield cps.index(cp_a), cps.index(cp_b), d
 
+def generate_google_maps_directions(cps):
+    def chunks(lst, n):
+        """Yield successive n-sized chunks from lst."""
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
+    BASE_URL = "https://www.google.com/maps/dir/"
+    LIMIT_WPS = 10  # Google maps seems to only allow 10 waypoints
+
+    for part in chunks(cps, LIMIT_WPS):
+        params = {
+            "api":1,
+            "travelmode": "walking",
+            "origin": f"{part[0].lat},{part[0].lng}",
+            "origin_place_id": f"{part[0].number}: {part[0].short_description}",
+            "destination": f"{part[-1].lat},{part[-1].lng}",
+            "destination_place_id": f"{part[-1].number}: {part[-1].short_description}",
+            "waypoints": "|".join(f"{part[i+1].lat},{part[i+1].lng}" for i in range(len(part)-2)),
+            "waypoint_place_ids": "|".join(f"{part[i+1].number}: {part[i+1].short_description}" for i in range(len(part)-2))
+            }
+        yield f"{BASE_URL}?{urllib.parse.urlencode(params)}"
 
 def opt(location, exclude: List[int], use_cache: bool):
     if use_cache:
@@ -84,9 +106,17 @@ def opt(location, exclude: List[int], use_cache: bool):
     )
 
     optimally_sorted_cps = [cps[i] for i in best_state]
+
     print("Optimal path:")
     for cp in optimally_sorted_cps:
         print(f"- {cp.number}: {cp.short_description}")
+
+    print()
+    for i, url in enumerate(generate_google_maps_directions(cps)):
+        print(f"Google maps URL #{i+1}:")
+        print(url)
+    print()
+
     print(f"Distance to travel {best_fitness*1e-3} km")
 
 
