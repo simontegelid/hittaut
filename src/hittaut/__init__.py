@@ -1,22 +1,17 @@
-import sys
 from datetime import timedelta
-import itertools
 from typing import List
 import urllib.parse
+import logging
 
 import requests
 import requests_cache
 
-import six
-
-sys.modules["sklearn.externals.six"] = six
-import mlrose
-import numpy as np
-import geopy.distance
 
 from .models.checkpoints import Checkpoints
 from .models.locations import Locations
-from .conversion import from_latlon
+from .opt import tsp
+
+logger = logging.getLogger(__name__)
 
 
 def get_locations():
@@ -33,36 +28,37 @@ def get_checkpoints(location_id):
     return Checkpoints.parse_obj(r.json())
 
 
-def generate_distances(cps: Checkpoints):
-    for cp_a, cp_b in itertools.combinations(cps, 2):
-        d = geopy.distance.geodesic((cp_a.lat, cp_a.lng), (cp_b.lat, cp_b.lng)).m
-        yield cps.index(cp_a), cps.index(cp_b), d
-
 def generate_google_maps_directions(cps):
     def chunks(lst, n):
         """Yield successive n-sized chunks from lst."""
         for i in range(0, len(lst), n):
-            yield lst[i:i + n]
+            yield lst[i : i + n]
 
     BASE_URL = "https://www.google.com/maps/dir/"
     LIMIT_WPS = 10  # Google maps seems to only allow 10 waypoints
 
     for part in chunks(cps, LIMIT_WPS):
         params = {
-            "api":1,
+            "api": 1,
             "travelmode": "walking",
             "origin": f"{part[0].lat},{part[0].lng}",
             "origin_place_id": f"{part[0].number}: {part[0].short_description}",
             "destination": f"{part[-1].lat},{part[-1].lng}",
             "destination_place_id": f"{part[-1].number}: {part[-1].short_description}",
-            "waypoints": "|".join(f"{part[i+1].lat},{part[i+1].lng}" for i in range(len(part)-2)),
-            "waypoint_place_ids": "|".join(f"{part[i+1].number}: {part[i+1].short_description}" for i in range(len(part)-2))
-            }
+            "waypoints": "|".join(
+                f"{part[i+1].lat},{part[i+1].lng}" for i in range(len(part) - 2)
+            ),
+            "waypoint_place_ids": "|".join(
+                f"{part[i+1].number}: {part[i+1].short_description}"
+                for i in range(len(part) - 2)
+            ),
+        }
         yield f"{BASE_URL}?{urllib.parse.urlencode(params)}"
+
 
 def opt(location, exclude: List[int], use_cache: bool):
     if use_cache:
-        print("Setting up HTTP cache")
+        logger.info("Setting up HTTP cache")
         requests_cache.install_cache("hittaut", expire_after=timedelta(days=1))
 
     locations = get_locations()
@@ -75,37 +71,16 @@ def opt(location, exclude: List[int], use_cache: bool):
         return
 
     location = filtered_locations[0]
-    print(f"Found location {location.name}")
+    logging.info(f"Found location {location.name}")
 
     cps = list(get_checkpoints(location.id))
-    print(f"Got {len(cps)} checkpoints")
+    logging.info(f"Got {len(cps)} checkpoints")
 
-    use_geodesic_dist = False
-    if use_geodesic_dist:
-        # This is suuuuuuuuuuuuuper slow in mlrose
-        dist_list = list(generate_distances(cps))
-        fitness_fn = mlrose.TravellingSales(distances=dist_list)
-    else:
-        # Convert WGS84 to UTM to allow mlrose to use np.linalg.norm to
-        # evaluate fitness and still come close to the truth. Much faster.
-        coords_list = [from_latlon(cp.lat, cp.lng)[0:2] for cp in cps]
-        fitness_fn = mlrose.TravellingSales(coords=coords_list)
+    optimal_route_indices, route_distance = tsp(cps)
+    if not optimal_route_indices:
+        return
 
-    print("Optimizing, this might take a while...")
-    problem_fit = mlrose.TSPOpt(
-        length=len(cps),
-        fitness_fn=fitness_fn,
-        maximize=False,
-    )
-    best_state, best_fitness = mlrose.genetic_alg(
-        problem_fit,
-        pop_size=600,
-        mutation_prob=0.2,
-        max_attempts=1000,
-        # random_state=2,
-    )
-
-    optimally_sorted_cps = [cps[i] for i in best_state]
+    optimally_sorted_cps = [cps[i] for i in optimal_route_indices]
 
     print("Optimal path:")
     for cp in optimally_sorted_cps:
@@ -117,7 +92,7 @@ def opt(location, exclude: List[int], use_cache: bool):
         print(url)
     print()
 
-    print(f"Distance to travel {best_fitness*1e-3} km")
+    print(f"Distance to travel {route_distance*1e-3} km")
 
 
 def main():
@@ -144,6 +119,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level="INFO",
+        format="%(asctime)s.%(msecs)03d %(message)s",
+        datefmt="%Y-%m-%d,%H:%M:%S",
+    )
 
     opt(args.location, args.exclude, args.cache)
 

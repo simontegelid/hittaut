@@ -1,6 +1,6 @@
-mlrose
+ortools
 pydantic
 requests
 requests-cache
-six
+numpy
 geopy
